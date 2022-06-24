@@ -82,7 +82,7 @@ impl NetworkTest for ReconfigurationTest {
     //
     //         {
     //             println!("Switch decoupled-execution on and off repetitively.");
-    //             let upgrade_config = OnChainConsensusConfig::V2(ConsensusConfigV2 {
+    //             let upgrade_config = OnChainConsensusConfig::V2(ConsensusConfigV1 {
     //                 two_chain: true,
     //                 decoupled_execution: true,
     //                 back_pressure_limit: 10,
