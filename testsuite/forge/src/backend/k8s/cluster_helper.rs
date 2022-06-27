@@ -70,9 +70,11 @@ async fn delete_k8s_collection<T: Clone + DeserializeOwned + Meta>(
     api: Api<T>,
     name: &'static str,
 ) -> Result<()> {
-    println!("gonna match");
     match api
-        .delete_collection(&DeleteParams::default(), &ListParams::default())
+        .delete_collection(
+            &DeleteParams::default(),
+            &ListParams::default().labels("app.kubernetes.io/part-of=aptos-node"),
+        )
         .await?
     {
         either::Left(list) => {
