@@ -136,6 +136,10 @@ impl NodeKey {
         };
         Ok(NodeKey::new(version, nibble_path))
     }
+
+    pub fn unpack(self) -> (Version, NibblePath) {
+        (self.version, self.nibble_path)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -626,7 +630,6 @@ impl<K> From<LeafNode<K>> for SparseMerkleLeafNode {
 #[repr(u8)]
 #[derive(FromPrimitive, ToPrimitive)]
 enum NodeTag {
-    Null = 0,
     Leaf = 1,
     Internal = 2,
 }
@@ -634,8 +637,6 @@ enum NodeTag {
 /// The concrete node type of [`JellyfishMerkleTree`](crate::JellyfishMerkleTree).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Node<K> {
-    /// Represents `null`.
-    Null,
     /// A wrapper of [`InternalNode`].
     Internal(InternalNode),
     /// A wrapper of [`LeafNode`].
@@ -664,11 +665,6 @@ impl<K> Node<K>
 where
     K: crate::Key,
 {
-    /// Creates the [`Null`](Node::Null) variant.
-    pub fn new_null() -> Self {
-        Node::Null
-    }
-
     /// Creates the [`Internal`](Node::Internal) variant.
     #[cfg(any(test, feature = "fuzzing"))]
     pub fn new_internal(children: Children) -> Self {
@@ -694,7 +690,6 @@ where
         match self {
             // The returning value will be used to construct a `Child` of a internal node, while an
             // internal node will never have a child of Node::Null.
-            Self::Null => unreachable!(),
             Self::Leaf(_) => NodeType::Leaf,
             Self::Internal(n) => n.node_type(),
         }
@@ -703,7 +698,6 @@ where
     /// Returns leaf count if known
     pub fn leaf_count(&self) -> usize {
         match self {
-            Node::Null => 0,
             Node::Leaf(_) => 1,
             Node::Internal(internal_node) => internal_node.leaf_count,
         }
@@ -714,9 +708,6 @@ where
         let mut out = vec![];
 
         match self {
-            Node::Null => {
-                out.push(NodeTag::Null as u8);
-            }
             Node::Internal(internal_node) => {
                 out.push(NodeTag::Internal as u8);
                 internal_node.serialize(&mut out)?;
@@ -734,7 +725,6 @@ where
     /// Computes the hash of nodes.
     pub fn hash(&self) -> HashValue {
         match self {
-            Node::Null => *SPARSE_MERKLE_PLACEHOLDER_HASH,
             Node::Internal(internal_node) => internal_node.hash(),
             Node::Leaf(leaf_node) => leaf_node.hash(),
         }
@@ -748,7 +738,6 @@ where
         let tag = val[0];
         let node_tag = NodeTag::from_u8(tag);
         match node_tag {
-            Some(NodeTag::Null) => Ok(Node::Null),
             Some(NodeTag::Internal) => Ok(Node::Internal(InternalNode::deserialize(&val[1..])?)),
             Some(NodeTag::Leaf) => Ok(Node::Leaf(bcs::from_bytes(&val[1..])?)),
             None => Err(NodeDecodeError::UnknownTag { unknown_tag: tag }.into()),

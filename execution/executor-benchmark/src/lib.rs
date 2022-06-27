@@ -3,6 +3,8 @@
 
 mod account_generator;
 pub mod db_generator;
+pub mod pipeline;
+pub mod state_commit_maker;
 pub mod state_committer;
 pub mod transaction_committer;
 pub mod transaction_executor;
@@ -15,22 +17,16 @@ use crate::{
 use aptos_config::config::{
     NodeConfig, RocksdbConfig, StoragePrunerConfig, NO_OP_STORAGE_PRUNER_CONFIG,
 };
-use aptos_logger::prelude::*;
 
-use crate::state_committer::StateCommitter;
+use crate::{pipeline::Pipeline, state_commit_maker::StateCommitMaker};
 use aptos_vm::AptosVM;
 use aptosdb::AptosDB;
 use executor::block_executor::BlockExecutor;
-use executor_types::BlockExecutorTrait;
-use std::{
-    fs,
-    path::Path,
-    sync::{mpsc, Arc},
-};
-use storage_interface::DbReaderWriter;
+use std::{fs, path::Path, sync::Arc};
+use storage_interface::{DbReader, DbReaderWriter};
 
-pub fn init_db_and_executor(config: &NodeConfig) -> (DbReaderWriter, BlockExecutor<AptosVM>) {
-    let db = DbReaderWriter::new(
+pub fn init_db_and_executor(config: &NodeConfig) -> (Arc<AptosDB>, BlockExecutor<AptosVM>) {
+    let (db, db_rw) = DbReaderWriter::wrap(
         AptosDB::open(
             &config.storage.dir(),
             false,                       /* readonly */
@@ -40,7 +36,7 @@ pub fn init_db_and_executor(config: &NodeConfig) -> (DbReaderWriter, BlockExecut
         .expect("DB should open."),
     );
 
-    let executor = BlockExecutor::new(db.clone());
+    let executor = BlockExecutor::new(db_rw);
 
     (db, executor)
 }
@@ -75,80 +71,18 @@ pub fn run_benchmark(
     config.storage.storage_pruner_config = pruner_config;
 
     let (db, executor) = init_db_and_executor(&config);
-    let start_version = db.reader.get_latest_version().unwrap();
-    let parent_block_id = executor.committed_block_id();
-    let base_smt = executor.root_smt();
-    let executor_1 = Arc::new(executor);
-    let executor_2 = executor_1.clone();
+    let start_version = db.get_latest_version().unwrap();
 
-    let (block_sender, block_receiver) = mpsc::sync_channel(50 /* bound */);
-    let (commit_sender, commit_receiver) = mpsc::sync_channel(3 /* bound */);
-    let (state_commit_sender, state_commit_receiver) = mpsc::sync_channel(100 /* bound */);
+    let (pipeline, block_sender) = Pipeline::new(db.state_store(), executor, start_version);
 
     let mut generator =
         TransactionGenerator::new_with_existing_db(block_sender, source_dir, start_version);
-    let start_version = generator.version();
-
-    // Spawn two threads to run transaction generator and executor separately.
-    let gen_thread = std::thread::Builder::new()
-        .name("txn_generator".to_string())
-        .spawn(move || {
-            generator.run_transfer(block_size, num_transfer_blocks);
-            generator
-        })
-        .expect("Failed to spawn transaction generator thread.");
-    let exe_thread = std::thread::Builder::new()
-        .name("txn_executor".to_string())
-        .spawn(move || {
-            let mut exe = TransactionExecutor::new(
-                executor_1,
-                parent_block_id,
-                start_version,
-                Some(commit_sender),
-            );
-            while let Ok(transactions) = block_receiver.recv() {
-                info!("Received block of size {:?} to execute", transactions.len());
-                exe.execute_block(transactions);
-            }
-        })
-        .expect("Failed to spawn transaction executor thread.");
-    let commit_thread = std::thread::Builder::new()
-        .name("txn_committer".to_string())
-        .spawn(move || {
-            let mut committer = TransactionCommitter::new(
-                executor_2,
-                start_version,
-                commit_receiver,
-                state_commit_sender,
-            );
-            committer.run();
-        })
-        .expect("Failed to spawn transaction committer thread.");
-    let db_writer = db.writer.clone();
-    let state_commit_thread = std::thread::Builder::new()
-        .name("state_committer".to_string())
-        .spawn(move || {
-            let committer = StateCommitter::new(
-                state_commit_receiver,
-                db_writer,
-                base_smt,
-                Some(start_version),
-            );
-            committer.run();
-        })
-        .expect("Failed to spawn transaction committer thread.");
-
-    // Wait for generator to finish.
-    let mut generator = gen_thread.join().unwrap();
+    generator.run_transfer(block_size, num_transfer_blocks);
     generator.drop_sender();
-    // Wait until all transactions are committed.
-    exe_thread.join().unwrap();
-    commit_thread.join().unwrap();
-    state_commit_thread.join().unwrap();
+    pipeline.join();
 
-    // Do a sanity check on the sequence number to make sure all transactions are committed.
     if verify_sequence_numbers {
-        generator.verify_sequence_numbers(db.reader);
+        generator.verify_sequence_numbers(db);
     }
 }
 

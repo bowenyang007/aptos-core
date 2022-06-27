@@ -78,7 +78,6 @@ pub mod node_type;
 pub mod restore;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod test_helper;
-mod tree_cache;
 
 use anyhow::{bail, ensure, format_err, Result};
 use aptos_crypto::{hash::CryptoHash, HashValue};
@@ -89,18 +88,29 @@ use aptos_types::{
     transaction::Version,
 };
 use node_type::{Child, Children, InternalNode, LeafNode, Node, NodeKey, NodeType};
+use once_cell::sync::Lazy;
 #[cfg(any(test, feature = "fuzzing"))]
 use proptest::arbitrary::Arbitrary;
 #[cfg(any(test, feature = "fuzzing"))]
 use proptest_derive::Arbitrary;
+use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     hash::Hash,
     marker::PhantomData,
 };
 use thiserror::Error;
-use tree_cache::TreeCache;
+
+const MAX_PARALLELIZABLE_DEPTH: usize = 2;
+const NUM_IO_THREADS: usize = 32;
+
+pub static IO_POOL: Lazy<ThreadPool> = Lazy::new(|| {
+    ThreadPoolBuilder::new()
+        .num_threads(NUM_IO_THREADS)
+        .build()
+        .unwrap()
+});
 
 #[derive(Error, Debug)]
 #[error("Missing state root node at version {version}, probably pruned.")]
@@ -128,7 +138,7 @@ pub trait TreeReader<K> {
 
 pub trait TreeWriter<K>: Send + Sync {
     /// Writes a node batch into storage.
-    fn write_node_batch(&self, node_batch: &NodeBatch<K>) -> Result<()>;
+    fn write_node_batch(&self, node_batch: &HashMap<NodeKey, Node<K>>) -> Result<()>;
 }
 
 pub trait StateValueWriter<K, V>: Send + Sync {
@@ -167,10 +177,6 @@ pub type NodeBatch<K> = HashMap<NodeKey, Node<K>>;
 /// Key-Value batch that will be written into db atomically with other batches.
 pub type StateValueBatch<K, V> = HashMap<(K, Version), V>;
 
-/// [`StaleNodeIndex`](struct.StaleNodeIndex.html) batch that will be written into db atomically
-/// with other batches.
-pub type StaleNodeIndexBatch = HashSet<StaleNodeIndex>;
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NodeStats {
     pub new_nodes: usize,
@@ -196,9 +202,54 @@ pub struct StaleNodeIndex {
 /// which is a vector of `hashed_account_address` and `new_value` pairs.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TreeUpdateBatch<K> {
-    pub node_batch: NodeBatch<K>,
-    pub stale_node_index_batch: StaleNodeIndexBatch,
-    pub node_stats: Vec<NodeStats>,
+    pub node_batch: Vec<Vec<(NodeKey, Node<K>)>>,
+    pub stale_node_index_batch: Vec<Vec<StaleNodeIndex>>,
+    pub num_new_leaves: usize,
+    pub num_stale_leaves: usize,
+}
+
+impl<K> TreeUpdateBatch<K> {
+    pub fn new() -> Self {
+        Self {
+            node_batch: vec![vec![]],
+            stale_node_index_batch: vec![vec![]],
+            num_new_leaves: 0,
+            num_stale_leaves: 0,
+        }
+    }
+
+    pub fn combine(&mut self, other: Self) {
+        let Self {
+            node_batch,
+            stale_node_index_batch,
+            num_new_leaves,
+            num_stale_leaves,
+        } = other;
+
+        self.node_batch.extend(node_batch);
+        self.stale_node_index_batch.extend(stale_node_index_batch);
+        self.num_new_leaves += num_new_leaves;
+        self.num_stale_leaves += num_stale_leaves;
+    }
+
+    pub fn inc_num_new_leaves(&mut self) {
+        self.num_new_leaves += 1;
+    }
+
+    pub fn inc_num_stale_leaves(&mut self) {
+        self.num_stale_leaves += 1;
+    }
+
+    pub fn put_node(&mut self, node_key: NodeKey, node: Node<K>) {
+        self.node_batch[0].push((node_key, node))
+    }
+
+    pub fn put_stale_node(&mut self, node_key: NodeKey, stale_since_version: Version) {
+        self.stale_node_index_batch[0].push(StaleNodeIndex {
+            node_key,
+            stale_since_version,
+        });
+    }
 }
 
 /// An iterator that iterates the index range (inclusive) of each different nibble at given
@@ -253,7 +304,7 @@ pub struct JellyfishMerkleTree<'a, R, K> {
 
 impl<'a, R, K> JellyfishMerkleTree<'a, R, K>
 where
-    R: 'a + TreeReader<K>,
+    R: 'a + TreeReader<K> + Sync,
     K: Key,
 {
     /// Creates a `JellyfishMerkleTree` backed by the given [`TreeReader`](trait.TreeReader.html).
@@ -322,64 +373,43 @@ where
     /// the returned batch, the state `S_{i+1}` is ready to be read from the tree by calling
     /// [`get_with_proof`](struct.JellyfishMerkleTree.html#method.get_with_proof). Anything inside
     /// the batch is not reachable from public interfaces before being committed.
-    pub fn batch_put_value_sets(
+    pub fn batch_put_value_set(
         &self,
-        value_sets: Vec<Vec<(HashValue, &(HashValue, K))>>,
-        node_hashes: Option<Vec<&HashMap<NibblePath, HashValue>>>,
+        value_set: Vec<(HashValue, &(HashValue, K))>,
+        node_hashes: Option<&HashMap<NibblePath, HashValue>>,
         persisted_version: Option<Version>,
-        first_version: Version,
-    ) -> Result<(Vec<HashValue>, TreeUpdateBatch<K>)> {
-        let mut tree_cache = TreeCache::new(self.reader, first_version, persisted_version)?;
-        let hash_sets: Vec<_> = match node_hashes {
-            Some(hashes) => hashes.into_iter().map(Some).collect(),
-            None => (0..value_sets.len()).map(|_| None).collect(),
+        version: Version,
+    ) -> Result<(HashValue, TreeUpdateBatch<K>)> {
+        let deduped_and_sorted_kvs = value_set
+            .into_iter()
+            .collect::<BTreeMap<_, _>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        let mut batch = TreeUpdateBatch::new();
+        let (_root_node_key, root_node) = if let Some(persisted_version) = persisted_version {
+            IO_POOL.install(|| {
+                self.batch_insert_at(
+                    NodeKey::new_empty_path(persisted_version),
+                    version,
+                    &deduped_and_sorted_kvs,
+                    0,
+                    &node_hashes,
+                    &mut batch,
+                )
+            })?
+        } else {
+            self.batch_create_subtree(
+                NodeKey::new_empty_path(version),
+                version,
+                &deduped_and_sorted_kvs,
+                0,
+                &node_hashes,
+                &mut batch,
+            )?
         };
 
-        for (idx, (value_set, hash_set)) in
-            itertools::zip_eq(value_sets.into_iter(), hash_sets.into_iter()).enumerate()
-        {
-            if value_set.is_empty() {
-                tree_cache.freeze();
-                continue;
-            }
-
-            let version = first_version + idx as u64;
-            let deduped_and_sorted_kvs = value_set
-                .into_iter()
-                .collect::<BTreeMap<_, _>>()
-                .into_iter()
-                .collect::<Vec<_>>();
-            let root_node_key = tree_cache.get_root_node_key().clone();
-            let (new_root_node_key, _) = self.batch_insert_at(
-                root_node_key,
-                version,
-                deduped_and_sorted_kvs.as_slice(),
-                0,
-                &hash_set,
-                &mut tree_cache,
-            )?;
-            tree_cache.set_root_node_key(new_root_node_key);
-
-            // Freezes the current cache to make all contents in the current cache immutable.
-            tree_cache.freeze();
-        }
-
-        Ok(tree_cache.into())
-    }
-
-    #[cfg(any(test, feature = "fuzzing"))]
-    pub fn batch_put_value_sets_test(
-        &self,
-        value_sets: Vec<Vec<(HashValue, &(HashValue, K))>>,
-        node_hashes: Option<Vec<&HashMap<NibblePath, HashValue>>>,
-        first_version: Version,
-    ) -> Result<(Vec<HashValue>, TreeUpdateBatch<K>)> {
-        self.batch_put_value_sets(
-            value_sets,
-            node_hashes,
-            first_version.checked_sub(1),
-            first_version,
-        )
+        Ok((root_node.hash(), batch))
     }
 
     fn batch_insert_at(
@@ -389,100 +419,123 @@ where
         kvs: &[(HashValue, &(HashValue, K))],
         depth: usize,
         hash_cache: &Option<&HashMap<NibblePath, HashValue>>,
-        tree_cache: &mut TreeCache<R, K>,
+        batch: &mut TreeUpdateBatch<K>,
     ) -> Result<(NodeKey, Node<K>)> {
-        let node = tree_cache.get_node(&node_key)?;
+        let node = self.reader.get_node(&node_key)?;
+        batch.put_stale_node(node_key.clone(), version);
+
         Ok(match node {
             Node::Internal(internal_node) => {
-                // We always delete the existing internal node here because it will not be referenced anyway
-                // since this version.
-                tree_cache.delete_node(&node_key, false /* is_leaf */);
-
                 // Reuse the current `InternalNode` in memory to create a new internal node.
                 let mut children: Children = internal_node.clone().into();
 
                 // Traverse all the path touched by `kvs` from this internal node.
-                for (left, right) in NibbleRangeIterator::new(kvs, depth) {
-                    // Traverse downwards from this internal node recursively by splitting the updates into
-                    // each child index
-                    let child_index = kvs[left].0.get_nibble(depth);
-
-                    let (new_child_node_key, new_child_node) =
-                        match internal_node.child(child_index) {
-                            Some(child) => {
-                                let child_node_key =
-                                    node_key.gen_child_node_key(child.version, child_index);
-                                self.batch_insert_at(
-                                    child_node_key,
+                let range_iter = NibbleRangeIterator::new(kvs, depth);
+                let new_children: Vec<_> = if depth > MAX_PARALLELIZABLE_DEPTH {
+                    range_iter
+                        .map(|(left, right)| {
+                            self.insert_at_child(
+                                &node_key,
+                                &internal_node,
+                                version,
+                                kvs,
+                                left,
+                                right,
+                                depth,
+                                hash_cache,
+                                batch,
+                            )
+                        })
+                        .collect::<Result<_>>()?
+                } else {
+                    range_iter
+                        .collect::<Vec<_>>()
+                        .par_iter()
+                        .map(|(left, right)| {
+                            let mut sub_batch = TreeUpdateBatch::new();
+                            Ok((
+                                self.insert_at_child(
+                                    &node_key,
+                                    &internal_node,
                                     version,
-                                    &kvs[left..=right],
-                                    depth + 1,
+                                    kvs,
+                                    *left,
+                                    *right,
+                                    depth,
                                     hash_cache,
-                                    tree_cache,
-                                )?
-                            }
-                            None => {
-                                let new_child_node_key =
-                                    node_key.gen_child_node_key(version, child_index);
-                                self.batch_create_subtree(
-                                    new_child_node_key,
-                                    version,
-                                    &kvs[left..=right],
-                                    depth + 1,
-                                    hash_cache,
-                                    tree_cache,
-                                )?
-                            }
-                        };
+                                    &mut sub_batch,
+                                )?,
+                                sub_batch,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>>>()?
+                        .into_iter()
+                        .map(|(ret, sub_batch)| {
+                            batch.combine(sub_batch);
+                            ret
+                        })
+                        .collect()
+                };
+                children.extend(new_children.into_iter());
 
-                    children.insert(
-                        child_index,
-                        Child::new(
-                            Self::get_hash(&new_child_node_key, &new_child_node, hash_cache),
-                            version,
-                            new_child_node.node_type(),
-                        ),
-                    );
-                }
                 let new_internal_node = InternalNode::new(children);
-
                 node_key.set_version(version);
+                batch.put_node(node_key.clone(), new_internal_node.clone().into());
 
-                // Cache this new internal node.
-                tree_cache.put_node(node_key.clone(), new_internal_node.clone().into())?;
                 (node_key, new_internal_node.into())
             }
             Node::Leaf(leaf_node) => {
-                // We are on a leaf node but trying to insert another node, so we may diverge.
-                // We always delete the existing leaf node here because it will not be referenced anyway
-                // since this version.
-                tree_cache.delete_node(&node_key, true /* is_leaf */);
+                batch.inc_num_stale_leaves();
                 node_key.set_version(version);
                 self.batch_create_subtree_with_existing_leaf(
-                    node_key, version, leaf_node, kvs, depth, hash_cache, tree_cache,
-                )?
-            }
-            Node::Null => {
-                if !node_key.nibble_path().is_empty() {
-                    bail!(
-                        "Null node exists for non-root node with node_key {:?}",
-                        node_key
-                    );
-                }
-
-                if node_key.version() == version {
-                    tree_cache.delete_node(&node_key, false /* is_leaf */);
-                }
-                self.batch_create_subtree(
-                    NodeKey::new_empty_path(version),
-                    version,
-                    kvs,
-                    depth,
-                    hash_cache,
-                    tree_cache,
+                    node_key, version, leaf_node, kvs, depth, hash_cache, batch,
                 )?
             }
         })
+    }
+
+    fn insert_at_child(
+        &self,
+        node_key: &NodeKey,
+        internal_node: &InternalNode,
+        version: Version,
+        kvs: &[(HashValue, &(HashValue, K))],
+        left: usize,
+        right: usize,
+        depth: usize,
+        hash_cache: &Option<&HashMap<NibblePath, HashValue>>,
+        batch: &mut TreeUpdateBatch<K>,
+    ) -> Result<(Nibble, Child)> {
+        let child_index = kvs[left].0.get_nibble(depth);
+        let child = internal_node.child(child_index);
+
+        let (node_key, node) = match child {
+            Some(child) => self.batch_insert_at(
+                node_key.gen_child_node_key(child.version, child_index),
+                version,
+                &kvs[left..=right],
+                depth + 1,
+                hash_cache,
+                batch,
+            )?,
+            None => self.batch_create_subtree(
+                node_key.gen_child_node_key(version, child_index),
+                version,
+                &kvs[left..=right],
+                depth + 1,
+                hash_cache,
+                batch,
+            )?,
+        };
+
+        Ok((
+            child_index,
+            Child::new(
+                Self::get_hash(&node_key, &node, hash_cache),
+                version,
+                node.node_type(),
+            ),
+        ))
     }
 
     fn batch_create_subtree_with_existing_leaf(
@@ -493,7 +546,7 @@ where
         kvs: &[(HashValue, &(HashValue, K))],
         depth: usize,
         hash_cache: &Option<&HashMap<NibblePath, HashValue>>,
-        tree_cache: &mut TreeCache<R, K>,
+        batch: &mut TreeUpdateBatch<K>,
     ) -> Result<(NodeKey, Node<K>)> {
         let existing_leaf_key = existing_leaf_node.account_key();
 
@@ -503,7 +556,8 @@ where
                 kvs[0].1 .0,
                 (kvs[0].1 .1.clone(), version),
             );
-            tree_cache.put_node(node_key.clone(), new_leaf_node.clone())?;
+            batch.put_node(node_key.clone(), new_leaf_node.clone());
+            batch.inc_num_new_leaves();
             // TODO(lightmark): Add the purge logic the value here.
             Ok((node_key, new_leaf_node))
         } else {
@@ -522,7 +576,7 @@ where
                         &kvs[left..=right],
                         depth + 1,
                         hash_cache,
-                        tree_cache,
+                        batch,
                     )?
                 } else {
                     self.batch_create_subtree(
@@ -531,7 +585,7 @@ where
                         &kvs[left..=right],
                         depth + 1,
                         hash_cache,
-                        tree_cache,
+                        batch,
                     )?
                 };
                 children.insert(
@@ -550,13 +604,13 @@ where
                     existing_leaf_bucket,
                     Child::new(existing_leaf_node.hash(), version, NodeType::Leaf),
                 );
-
-                tree_cache.put_node(existing_leaf_node_key, existing_leaf_node.into())?;
+                batch.inc_num_new_leaves();
+                batch.put_node(existing_leaf_node_key, existing_leaf_node.into());
             }
 
             let new_internal_node = InternalNode::new(children);
+            batch.put_node(node_key.clone(), new_internal_node.clone().into());
 
-            tree_cache.put_node(node_key.clone(), new_internal_node.clone().into())?;
             Ok((node_key, new_internal_node.into()))
         }
     }
@@ -568,12 +622,13 @@ where
         kvs: &[(HashValue, &(HashValue, K))],
         depth: usize,
         hash_cache: &Option<&HashMap<NibblePath, HashValue>>,
-        tree_cache: &mut TreeCache<R, K>,
+        batch: &mut TreeUpdateBatch<K>,
     ) -> Result<(NodeKey, Node<K>)> {
         if kvs.len() == 1 {
             let new_leaf_node =
                 Node::new_leaf(kvs[0].0, kvs[0].1 .0, (kvs[0].1 .1.clone(), version));
-            tree_cache.put_node(node_key.clone(), new_leaf_node.clone())?;
+            batch.put_node(node_key.clone(), new_leaf_node.clone());
+            batch.inc_num_new_leaves();
             Ok((node_key, new_leaf_node))
         } else {
             let mut children = Children::new();
@@ -586,7 +641,7 @@ where
                     &kvs[left..=right],
                     depth + 1,
                     hash_cache,
-                    tree_cache,
+                    batch,
                 )?;
                 children.insert(
                     child_index,
@@ -599,28 +654,22 @@ where
             }
             let new_internal_node = InternalNode::new(children);
 
-            tree_cache.put_node(node_key.clone(), new_internal_node.clone().into())?;
+            batch.put_node(node_key.clone(), new_internal_node.clone().into());
             Ok((node_key, new_internal_node.into()))
         }
     }
 
     /// This is a convenient function that calls
-    /// [`put_value_sets`](struct.JellyfishMerkleTree.html#method.put_value_sets) with a single
-    /// `keyed_value_set`.
+    ///
+    /// [`put_value_sets`](struct.JellyfishMerkleTree.html#method.put_value_set) without the node hash
+    /// cache and assuming the base version is the immediate previous version.
     #[cfg(any(test, feature = "fuzzing"))]
     pub fn put_value_set_test(
         &self,
         value_set: Vec<(HashValue, &(HashValue, K))>,
         version: Version,
     ) -> Result<(HashValue, TreeUpdateBatch<K>)> {
-        let (root_hashes, tree_update_batch) =
-            self.batch_put_value_sets_test(vec![value_set], None, version)?;
-        assert_eq!(
-            root_hashes.len(),
-            1,
-            "root_hashes must consist of a single value.",
-        );
-        Ok((root_hashes[0], tree_update_batch))
+        self.batch_put_value_set(value_set, None, version.checked_sub(1), version)
     }
 
     /// Returns the value (if applicable) and the corresponding merkle proof.
@@ -678,16 +727,6 @@ where
                             siblings
                         }),
                     ));
-                }
-                Node::Null => {
-                    if nibble_depth == 0 {
-                        return Ok((None, SparseMerkleProof::new(None, vec![])));
-                    } else {
-                        bail!(
-                            "Non-root null node exists with node key {:?}",
-                            next_node_key
-                        );
-                    }
                 }
             }
         }

@@ -25,7 +25,6 @@ fn put_value_set(
     version: Version,
     base_version: Option<Version>,
 ) -> HashValue {
-    let mut cs = ChangeSet::new();
     let value_set: HashMap<_, _> = value_set
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
@@ -33,14 +32,9 @@ fn put_value_set(
     let jmt_updates = jmt_updates(&value_set);
 
     let root = state_store
-        .merklize_value_sets(
-            vec![jmt_update_refs(&jmt_updates)],
-            None,
-            version,
-            base_version,
-            &mut cs,
-        )
-        .unwrap()[0];
+        .save_snapshot(jmt_update_refs(&jmt_updates), None, version, base_version)
+        .unwrap();
+    let mut cs = ChangeSet::new();
     state_store
         .put_value_sets(vec![&value_set], version, &mut cs)
         .unwrap();
@@ -637,19 +631,18 @@ fn update_store(
     first_version: Version,
 ) {
     for (i, (key, value)) in input.enumerate() {
-        let mut cs = ChangeSet::new();
         let value_state_set = vec![(key, value)].into_iter().collect();
         let jmt_updates = jmt_updates(&value_state_set);
         let version = first_version + i as Version;
         store
-            .merklize_value_sets(
-                vec![jmt_update_refs(&jmt_updates)],
+            .save_snapshot(
+                jmt_update_refs(&jmt_updates),
                 None,
                 version,
                 version.checked_sub(1),
-                &mut cs,
             )
             .unwrap();
+        let mut cs = ChangeSet::new();
         store
             .put_value_sets(vec![&value_state_set], version, &mut cs)
             .unwrap();

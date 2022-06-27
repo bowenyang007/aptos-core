@@ -17,6 +17,7 @@ pub mod backup;
 pub mod errors;
 pub mod metrics;
 pub mod schema;
+pub mod state_store;
 
 mod change_set;
 mod db_options;
@@ -24,7 +25,6 @@ mod event_store;
 mod ledger_counters;
 mod ledger_store;
 mod pruner;
-mod state_store;
 mod system_store;
 mod transaction_store;
 
@@ -722,6 +722,11 @@ impl AptosDB {
             pruner.maybe_wake_pruner(latest_version)
         }
     }
+
+    #[cfg(feature = "fuzzing")]
+    pub fn state_store(&self) -> Arc<StateStore> {
+        self.state_store.clone()
+    }
 }
 
 impl DbReader for AptosDB {
@@ -1261,18 +1266,12 @@ impl DbWriter for AptosDB {
         base_version: Option<Version>,
     ) -> Result<()> {
         gauged_api("save_state_snapshot", || {
-            let mut cs = ChangeSet::new();
-            let root_hash = self
-                .state_store
-                .merklize_value_sets(
-                    vec![jmt_update_refs(&jmt_updates)],
-                    node_hashes.map(|hashes| vec![hashes]),
-                    version,
-                    base_version,
-                    &mut cs,
-                )?
-                .pop()
-                .expect("One root hash expected");
+            let root_hash = self.state_store.save_snapshot(
+                jmt_update_refs(&jmt_updates),
+                node_hashes,
+                version,
+                base_version,
+            )?;
             debug!(
                 version = version,
                 base_version = base_version,
