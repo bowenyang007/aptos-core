@@ -437,6 +437,7 @@ impl Transactions {
         }
 
         let resolver = self.context.move_resolver()?;
+        println!("blabla transaction parsing");
         let txn = match txn_data {
             TransactionData::OnChain(txn) => {
                 let timestamp = self.context.get_block_timestamp(txn.version)?;
