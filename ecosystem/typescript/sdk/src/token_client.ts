@@ -28,6 +28,7 @@ export class TokenClient {
       max_gas_amount: "4000",
     });
     const signedTxn = await this.aptosClient.signTransaction(account, txnRequest);
+    console.log(txnRequest);
     const res = await this.aptosClient.submitTransaction(signedTxn);
     await this.aptosClient.waitForTransaction(res.hash);
     return Promise.resolve(res.hash);
@@ -96,6 +97,7 @@ export class TokenClient {
       ],
     };
     const transactionHash = await this.submitTransactionHelper(account, payload);
+    console.log(transactionHash);
     return transactionHash;
   }
 
@@ -248,6 +250,7 @@ export class TokenClient {
       "0x1::token::Collections",
     );
     const { handle } = collection.data.token_data;
+    console.log(handle);
     const tokenId = {
       creator,
       collection: collectionName,
@@ -259,6 +262,7 @@ export class TokenClient {
       value_type: "0x1::token::TokenData",
       key: tokenId,
     };
+    console.log(getTokenTableItemRequest);
 
     const tableItem = await this.aptosClient.getTableItem(handle, getTokenTableItemRequest);
     return tableItem.data;
