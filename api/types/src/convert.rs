@@ -269,6 +269,21 @@ impl<'a, R: MoveResolverExt + ?Sized> MoveConverter<'a, R> {
     ) -> Result<WriteSetChange> {
         let handle = handle.to_be_bytes().to_vec().into();
         let key = key.into();
+
+        let op2 = op.clone();
+        if let WriteOp::Value(bytes) = op2 {
+            use move_deps::move_core_types::account_address::AccountAddress;
+            let value_type = TypeTag::Struct(StructTag {
+                address: AccountAddress::from_hex_literal("0x1").unwrap(),
+                module: Identifier::new("Token").unwrap(),
+                name: Identifier::new("TokenData").unwrap(),
+                type_params: Vec::new(),
+            });
+
+            let move_value = self.try_into_move_value(&value_type, &bytes)?;
+            dbg!("{:?}", move_value);
+        }
+
         let ret = match op {
             WriteOp::Deletion => WriteSetChange::DeleteTableItem {
                 state_key_hash,
