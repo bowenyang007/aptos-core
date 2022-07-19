@@ -186,9 +186,11 @@ impl State {
             value_type,
             key,
         } = body;
+        dbg!("value type 1 {}", &value_type);
         let key_type = key_type.try_into()?;
         let value_type = value_type.try_into()?;
-
+        
+        dbg!("value type 2 {}", &value_type);
         let resolver = self.state_view.as_move_resolver();
         let converter = resolver.as_converter();
 
