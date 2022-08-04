@@ -80,7 +80,6 @@ impl Client {
         #[derive(Deserialize)]
         struct Response {
             chain_id: u8,
-            #[serde(deserialize_with = "types::deserialize_from_string")]
             epoch: u64,
             #[serde(deserialize_with = "types::deserialize_from_string")]
             ledger_version: u64,
