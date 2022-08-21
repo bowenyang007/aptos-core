@@ -3,7 +3,7 @@
 
 //! Database-related functions
 #![allow(clippy::extra_unused_lifetimes)]
-use std::sync::Arc;
+use std::{cmp::min, sync::Arc};
 
 use diesel::{
     pg::PgConnection,
@@ -14,6 +14,25 @@ use diesel::{
 pub type PgPool = diesel::r2d2::Pool<ConnectionManager<PgConnection>>;
 pub type PgDbPool = Arc<PgPool>;
 pub type PgPoolConnection = PooledConnection<ConnectionManager<PgConnection>>;
+
+pub const MAX_DIESEL_PARAM_SIZE: u16 = u16::MAX;
+
+/// Given diesel has a limit of how many parameters can be inserted in a single operation (u16::MAX)
+/// we may need to chunk an array of items based on how many columns are in the table.
+/// This function returns boundaries of chunks in the form of (start_index, end_index)
+pub fn get_chunks(num_items_to_insert: usize, column_count: usize) -> Vec<(usize, usize)> {
+    let max_item_size = MAX_DIESEL_PARAM_SIZE as usize / column_count;
+    let mut chunk: (usize, usize) = (0, min(num_items_to_insert, max_item_size));
+    let mut chunks = vec![chunk];
+    while chunk.1 != num_items_to_insert {
+        chunk = (
+            chunk.0 + max_item_size + 1,
+            min(num_items_to_insert, chunk.1 + max_item_size),
+        );
+        chunks.push(chunk);
+    }
+    chunks
+}
 
 pub fn new_db_pool(database_url: &str) -> Result<PgDbPool, PoolError> {
     let manager = ConnectionManager::<PgConnection>::new(database_url);
