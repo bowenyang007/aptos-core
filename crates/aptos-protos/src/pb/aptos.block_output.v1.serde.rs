@@ -257,19 +257,25 @@ impl serde::Serialize for BlockOutput {
     {
         use serde::ser::SerializeStruct;
         let mut len = 0;
+        if self.height != 0 {
+            len += 1;
+        }
         if !self.transactions.is_empty() {
             len += 1;
         }
-        if self.height != 0 {
+        if self.chain_id != 0 {
             len += 1;
         }
         let mut struct_ser =
             serializer.serialize_struct("aptos.block_output.v1.BlockOutput", len)?;
+        if self.height != 0 {
+            struct_ser.serialize_field("height", ToString::to_string(&self.height).as_str())?;
+        }
         if !self.transactions.is_empty() {
             struct_ser.serialize_field("transactions", &self.transactions)?;
         }
-        if self.height != 0 {
-            struct_ser.serialize_field("height", ToString::to_string(&self.height).as_str())?;
+        if self.chain_id != 0 {
+            struct_ser.serialize_field("chainId", &self.chain_id)?;
         }
         struct_ser.end()
     }
@@ -280,12 +286,13 @@ impl<'de> serde::Deserialize<'de> for BlockOutput {
     where
         D: serde::Deserializer<'de>,
     {
-        const FIELDS: &[&str] = &["transactions", "height"];
+        const FIELDS: &[&str] = &["height", "transactions", "chainId"];
 
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
-            Transactions,
             Height,
+            Transactions,
+            ChainId,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -310,8 +317,9 @@ impl<'de> serde::Deserialize<'de> for BlockOutput {
                         E: serde::de::Error,
                     {
                         match value {
-                            "transactions" => Ok(GeneratedField::Transactions),
                             "height" => Ok(GeneratedField::Height),
+                            "transactions" => Ok(GeneratedField::Transactions),
+                            "chainId" => Ok(GeneratedField::ChainId),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -331,16 +339,11 @@ impl<'de> serde::Deserialize<'de> for BlockOutput {
             where
                 V: serde::de::MapAccess<'de>,
             {
-                let mut transactions__ = None;
                 let mut height__ = None;
+                let mut transactions__ = None;
+                let mut chain_id__ = None;
                 while let Some(k) = map.next_key()? {
                     match k {
-                        GeneratedField::Transactions => {
-                            if transactions__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("transactions"));
-                            }
-                            transactions__ = Some(map.next_value()?);
-                        }
                         GeneratedField::Height => {
                             if height__.is_some() {
                                 return Err(serde::de::Error::duplicate_field("height"));
@@ -350,11 +353,27 @@ impl<'de> serde::Deserialize<'de> for BlockOutput {
                                     .0,
                             );
                         }
+                        GeneratedField::Transactions => {
+                            if transactions__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("transactions"));
+                            }
+                            transactions__ = Some(map.next_value()?);
+                        }
+                        GeneratedField::ChainId => {
+                            if chain_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("chainId"));
+                            }
+                            chain_id__ = Some(
+                                map.next_value::<::pbjson::private::NumberDeserialize<_>>()?
+                                    .0,
+                            );
+                        }
                     }
                 }
                 Ok(BlockOutput {
-                    transactions: transactions__.unwrap_or_default(),
                     height: height__.unwrap_or_default(),
+                    transactions: transactions__.unwrap_or_default(),
+                    chain_id: chain_id__.unwrap_or_default(),
                 })
             }
         }
@@ -1216,7 +1235,7 @@ impl serde::Serialize for SignatureOutput {
         if self.threshold != 0 {
             len += 1;
         }
-        if !self.bitmap.is_empty() {
+        if !self.public_key_indices.is_empty() {
             len += 1;
         }
         if self.multi_agent_index != 0 {
@@ -1254,11 +1273,8 @@ impl serde::Serialize for SignatureOutput {
         if self.threshold != 0 {
             struct_ser.serialize_field("threshold", &self.threshold)?;
         }
-        if !self.bitmap.is_empty() {
-            struct_ser.serialize_field(
-                "bitmap",
-                pbjson::private::base64::encode(&self.bitmap).as_str(),
-            )?;
+        if !self.public_key_indices.is_empty() {
+            struct_ser.serialize_field("publicKeyIndices", &self.public_key_indices)?;
         }
         if self.multi_agent_index != 0 {
             struct_ser.serialize_field("multiAgentIndex", &self.multi_agent_index)?;
@@ -1283,7 +1299,7 @@ impl<'de> serde::Deserialize<'de> for SignatureOutput {
             "publicKey",
             "signature",
             "threshold",
-            "bitmap",
+            "publicKeyIndices",
             "multiAgentIndex",
             "multiSigIndex",
         ];
@@ -1297,7 +1313,7 @@ impl<'de> serde::Deserialize<'de> for SignatureOutput {
             PublicKey,
             Signature,
             Threshold,
-            Bitmap,
+            PublicKeyIndices,
             MultiAgentIndex,
             MultiSigIndex,
         }
@@ -1331,7 +1347,7 @@ impl<'de> serde::Deserialize<'de> for SignatureOutput {
                             "publicKey" => Ok(GeneratedField::PublicKey),
                             "signature" => Ok(GeneratedField::Signature),
                             "threshold" => Ok(GeneratedField::Threshold),
-                            "bitmap" => Ok(GeneratedField::Bitmap),
+                            "publicKeyIndices" => Ok(GeneratedField::PublicKeyIndices),
                             "multiAgentIndex" => Ok(GeneratedField::MultiAgentIndex),
                             "multiSigIndex" => Ok(GeneratedField::MultiSigIndex),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
@@ -1360,7 +1376,7 @@ impl<'de> serde::Deserialize<'de> for SignatureOutput {
                 let mut public_key__ = None;
                 let mut signature__ = None;
                 let mut threshold__ = None;
-                let mut bitmap__ = None;
+                let mut public_key_indices__ = None;
                 let mut multi_agent_index__ = None;
                 let mut multi_sig_index__ = None;
                 while let Some(k) = map.next_key()? {
@@ -1419,13 +1435,15 @@ impl<'de> serde::Deserialize<'de> for SignatureOutput {
                                     .0,
                             );
                         }
-                        GeneratedField::Bitmap => {
-                            if bitmap__.is_some() {
-                                return Err(serde::de::Error::duplicate_field("bitmap"));
+                        GeneratedField::PublicKeyIndices => {
+                            if public_key_indices__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("publicKeyIndices"));
                             }
-                            bitmap__ = Some(
-                                map.next_value::<::pbjson::private::BytesDeserialize<_>>()?
-                                    .0,
+                            public_key_indices__ = Some(
+                                map.next_value::<Vec<::pbjson::private::NumberDeserialize<_>>>()?
+                                    .into_iter()
+                                    .map(|x| x.0)
+                                    .collect(),
                             );
                         }
                         GeneratedField::MultiAgentIndex => {
@@ -1456,7 +1474,7 @@ impl<'de> serde::Deserialize<'de> for SignatureOutput {
                     public_key: public_key__.unwrap_or_default(),
                     signature: signature__.unwrap_or_default(),
                     threshold: threshold__.unwrap_or_default(),
-                    bitmap: bitmap__.unwrap_or_default(),
+                    public_key_indices: public_key_indices__.unwrap_or_default(),
                     multi_agent_index: multi_agent_index__.unwrap_or_default(),
                     multi_sig_index: multi_sig_index__.unwrap_or_default(),
                 })
