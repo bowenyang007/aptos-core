@@ -39,6 +39,8 @@ module post_mint_reveal_nft::minting {
     use aptos_token::token::{Self, TokenMutabilityConfig, create_token_mutability_config, create_collection, create_tokendata, TokenId, TokenDataId};
     use post_mint_reveal_nft::bucket_table::{Self, BucketTable};
     use post_mint_reveal_nft::big_vector::{Self, BigVector};
+    use post_mint_reveal_nft::bucket_table::{Self, BucketTable};
+    use post_mint_reveal_nft::big_vector::{Self, BigVector};
     use std::bcs;
 
 
@@ -200,7 +202,6 @@ module post_mint_reveal_nft::minting {
         token_mutate_config: vector<bool>,
         royalty_points_den: u64,
         royalty_points_num: u64,
-        public_mint_limit: u64,
     ) acquires NFTMintConfig {
         let nft_mint_config = borrow_global_mut<NFTMintConfig>(@post_mint_reveal_nft);
         assert!(signer::address_of(admin) == nft_mint_config.admin, error::permission_denied(ENOT_AUTHORIZED));
@@ -229,7 +230,7 @@ module post_mint_reveal_nft::minting {
             royalty_points_den,
             royalty_points_num,
             tokens: big_vector::empty<TokenAsset>(128),
-            public_mint_limit,
+            public_mint_limit: option::some(1),
         });
 
         // Create the source certificate collection and token.
