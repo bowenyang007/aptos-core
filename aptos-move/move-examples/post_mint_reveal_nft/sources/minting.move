@@ -510,4 +510,150 @@ module keys_custom::minting {
     // ======================================================================
     //   unit tests //
     // ======================================================================
+
+    #[test_only]
+    public fun set_up_test(
+        source_account: &signer,
+        resource_account: &signer,
+        admin_account: &signer,
+        wl_nft_claimer: &signer,
+        treasury_account: &signer,
+        aptos_framework: &signer,
+        timestamp: u64,
+    ) acquires NFTMintConfig {
+        use aptos_framework::account::create_account_for_test;
+
+        // set up global time for testing purpose
+        timestamp::set_time_has_started_for_testing(aptos_framework);
+        timestamp::update_global_time_for_test_secs(timestamp);
+
+        create_account_for_test(signer::address_of(source_account));
+        // create a resource account from the origin account, mocking the module publishing process
+        resource_account::create_resource_account(source_account, vector::empty<u8>(), vector::empty<u8>());
+        init_module(resource_account);
+
+        create_account_for_test(signer::address_of(wl_nft_claimer));
+        create_account_for_test(signer::address_of(admin_account));
+        create_account_for_test(signer::address_of(treasury_account));
+
+        let (burn_cap, mint_cap) = aptos_framework::aptos_coin::initialize_for_test(aptos_framework);
+        coin::register<AptosCoin>(wl_nft_claimer);
+        coin::register<AptosCoin>(treasury_account);
+        coin::deposit(signer::address_of(wl_nft_claimer), coin::mint(100, &mint_cap));
+
+        coin::destroy_burn_cap(burn_cap);
+        coin::destroy_mint_cap(mint_cap);
+
+        set_admin(source_account, signer::address_of(admin_account));
+        set_treasury(admin_account, signer::address_of(treasury_account));
+    }
+
+    #[test_only]
+    public entry fun set_up_token_uris(admin_account: &signer) acquires NFTMintConfig, CollectionConfig {
+        let token_uris = vector::empty<String>();
+        let i = 0;
+        while (i < 3) {
+            vector::push_back(&mut token_uris, utf8(b"token uri"));
+            i = i + 1;
+        };
+        add_tokens(admin_account, token_uris);
+    }
+
+    #[test (source_account = @0xa9ee1f7903fff959eb197e8d8c080cc1c3ac2c4d45fbf03880b79fb54847b222, resource_account = @0x9c29bac6d9f5ec5c9e33a5c12522205b71637b10ed2bc5027917ad60ee5f7536, admin_account = @0x456, wl_nft_claimer = @0x123, treasury_account = @0x345, aptos_framework = @aptos_framework)]
+    public entry fun test_happy_path(
+        source_account: signer,
+        resource_account: signer,
+        admin_account: signer,
+        wl_nft_claimer: signer,
+        treasury_account: signer,
+        aptos_framework: signer,
+    ) acquires NFTMintConfig, WhitelistMintConfig, CollectionConfig, SourceToken, RevealConfig {
+        set_up_test(&source_account, &resource_account, &admin_account, &wl_nft_claimer, &treasury_account, &aptos_framework, 10);
+        let creator_addr = signer::address_of(&resource_account);
+        let collection_name = utf8(b"keys");
+        create_keys_collection_with_key_metadata(
+            &admin_account,
+            collection_name,
+            utf8(b"we are keys"),
+            100,
+            utf8(b"collection uri"),
+            utf8(b"key"),
+            utf8(b"each key can be burned"),
+            utf8(b"token uri"),
+            signer::address_of(&treasury_account),
+            100,
+            5
+        );
+        let nft_claimer_addr = signer::address_of(&wl_nft_claimer);
+        add_to_whitelist(&admin_account, vector[nft_claimer_addr], 1);
+        mint_keys(&wl_nft_claimer, 1);
+
+        // check that key #1 was minted and given to wl addr
+        let key1 = token::create_token_id_raw(creator_addr, collection_name, utf8(b"keys #1"), 0);
+        assert!(token::balance_of(nft_claimer_addr, key1) == 1, 0);
+    
+        let destination_collection_name = utf8(b"treasure");
+        set_destination_collection_config(
+            &admin_account, 
+            destination_collection_name,
+            utf8(b"we are treasures"),
+            100,
+            utf8(b"treasure collection uri"),
+            utf8(b"treasure"),
+            signer::address_of(&treasury_account),
+            utf8(b"treasure is awesome"),
+            3,
+            5,
+            100,
+        );
+        create_destination_collection_from_config(&admin_account);
+        set_reveal_config(&admin_account, 5, 50);
+        
+        timestamp::fast_forward_seconds(50);
+        // set_minting_and_reveal_config(&admin_account, 50, 200, 5, 201, 400, 10, 400);
+        // let wl_addresses = vector::empty<address>();
+        // vector::push_back(&mut wl_addresses, signer::address_of(&wl_nft_claimer));
+        // add_to_whitelist(&admin_account, wl_addresses, 2);
+        // set_up_token_uris(&admin_account);
+
+        // timestamp::fast_forward_seconds(50);
+        // mint_source_certificate(&wl_nft_claimer, 2);
+        // let white_list_config = borrow_global_mut<WhitelistMintConfig>(@post_mint_reveal_nft);
+        // assert!(*bucket_table::borrow(&mut white_list_config.whitelisted_address, signer::address_of(&wl_nft_claimer)) == 0, 0);
+
+        // timestamp::fast_forward_seconds(160);
+        // let public_mint_config = borrow_global_mut<PublicMintConfig>(@post_mint_reveal_nft);
+
+        // // Assert that the source certificates exist in the nft claimers' TokenStore.
+        // let source_token = borrow_global<SourceToken>(@post_mint_reveal_nft);
+        // let (owner, collection, name) = token::get_token_data_id_fields(&source_token.token_data_id);
+        // let token_id1 = token::create_token_id_raw(owner, collection, name, 1);
+        // let token_id2 = token::create_token_id_raw(owner, collection, name, 2);
+        // let token_id3 = token::create_token_id_raw(owner, collection, name, 3);
+        // assert!(token::balance_of(signer::address_of(&wl_nft_claimer), token_id1) == 1, 0);
+        // assert!(token::balance_of(signer::address_of(&wl_nft_claimer), token_id2) == 1, 1);
+
+        // let whitelist_mint_config = borrow_global_mut<WhitelistMintConfig>(@post_mint_reveal_nft);
+        // assert!(*bucket_table::borrow(&mut whitelist_mint_config.whitelisted_address, signer::address_of(&wl_nft_claimer)) == 0, 0);
+        // assert!(coin::balance<AptosCoin>(signer::address_of(&treasury_account))== 20, 1);
+        // assert!(coin::balance<AptosCoin>(signer::address_of(&wl_nft_claimer))== 90, 2);
+
+        // // Exchange to the destination NFT.
+        // timestamp::fast_forward_seconds(401);
+        // exchange(&wl_nft_claimer, 1);
+        // exchange(&wl_nft_claimer, 2);
+
+        // // Assert that the exchange was successful.
+        // let collection_config = borrow_global<CollectionConfig>(@post_mint_reveal_nft);
+        // let exchanged_token_id1 = token::create_token_id_raw(signer::address_of(&resource_account), collection_config.collection_name, utf8(b"base token name: 1"), 0);
+        // let exchanged_token_id2 = token::create_token_id_raw(signer::address_of(&resource_account), collection_config.collection_name, utf8(b"base token name: 2"), 0);
+        // let exchanged_token_id3 = token::create_token_id_raw(signer::address_of(&resource_account), collection_config.collection_name, utf8(b"base token name: 3"), 0);
+        // assert!(token::balance_of(signer::address_of(&wl_nft_claimer), exchanged_token_id1) == 1, 3);
+        // assert!(token::balance_of(signer::address_of(&wl_nft_claimer), exchanged_token_id2) == 1, 4);
+        // assert!(big_vector::length(&collection_config.tokens) == 0, 6);
+
+        // // Assert that we burned the source certificate.
+        // assert!(token::balance_of(signer::address_of(&wl_nft_claimer), token_id1) == 0, 0);
+        // assert!(token::balance_of(signer::address_of(&wl_nft_claimer), token_id2) == 0, 1);
+    }
 }
