@@ -1,5 +1,5 @@
 [package]
-name = "post_mint_reveal_nft_custom"
+name = "keys"
 version = "0.0.0"
 upgrade_policy = "compatible"
 
@@ -11,3 +11,7 @@ DataStructure = { local = "../data_structures" }
 
 [addresses]
 source_addr = "_"
+
+[dev-addresses]
+source_addr = "0xcafe"
+# keys_custom = "0xc3bb8488ab1a5815a9d543d7e41b0e0df46a7396f89b22821f07a4362f75ddc5"
